@@ -2,23 +2,35 @@ import psycopg2
 import requests
 
 
-def get_vacancies(employer_id):
+def get_vacancies(employer_id: str) -> list:
     """Получение данных вакансий по API"""
 
     params = {
-        'area': 1,
+        'employer_id': employer_id,
         'page': 0,
-        'per_page': 10
+        'per_page': 100
     }
-    url = f"https://api.hh.ru/vacancies?employer_id={employer_id}"
+    url = "https://api.hh.ru/vacancies/"
     data_vacancies = requests.get(url, params=params).json()
 
     vacancies_data = []
     for item in data_vacancies["items"]:
+        salary = item["salary"]
+        if salary:
+            salary_from = salary['from']
+            salary_to = salary['to']
+            if salary_from and not salary_to:
+                salary = salary_from
+            elif not salary_from and salary_to:
+                salary = salary_to
+            elif salary_from and salary_to:
+                salary = (salary_from + salary_to) / 2
+        else:
+            salary = None
         hh_vacancies = {
             'vacancy_id': int(item['id']),
             'vacancies_name': item['name'],
-            'payment': item["salary"]["from"] if item["salary"] else None,
+            'payment': salary,
             'requirement': item['snippet']['requirement'],
             'vacancies_url': item['alternate_url'],
             'employer_id': employer_id
@@ -26,11 +38,11 @@ def get_vacancies(employer_id):
         if hh_vacancies['payment'] is not None:
             vacancies_data.append(hh_vacancies)
 
-        return vacancies_data
+    return vacancies_data
 
 
-def get_employer(employer_id):
-    """Получение данных о работодателей  по API"""
+def get_employer(employer_id: str) -> dict:
+    """Получение данных о работодателе по API"""
 
     url = f"https://api.hh.ru/employers/{employer_id}"
     data_vacancies = requests.get(url).json()
@@ -43,21 +55,19 @@ def get_employer(employer_id):
     return hh_company
 
 
-def create_table():
-    """Создание БД, созданение таблиц"""
+def create_table(db_name: str, params: dict) -> None:
+    """Создание БД, создание таблиц"""
 
-    conn = psycopg2.connect(host="localhost", database="postgres",
-                            user="postgres", password="12345")
+    conn = psycopg2.connect(database="postgres", **params)
     conn.autocommit = True
     cur = conn.cursor()
 
-    cur.execute("DROP DATABASE IF EXISTS course_work_5")
-    cur.execute("CREATE DATABASE course_work_5")
+    cur.execute(f"DROP DATABASE IF EXISTS {db_name}")
+    cur.execute(f"CREATE DATABASE {db_name}")
 
     conn.close()
 
-    conn = psycopg2.connect(host="localhost", database="course_work_5",
-                            user="postgres", password="12345")
+    conn = psycopg2.connect(database=db_name, **params)
     with conn.cursor() as cur:
         cur.execute("""
                     CREATE TABLE employers (
@@ -68,39 +78,39 @@ def create_table():
 
         cur.execute("""
                     CREATE TABLE vacancies (
-                    vacancy_id SERIAL PRIMARY KEY,
+                    vacancy_id INTEGER PRIMARY KEY,
+                    employer_id INTEGER REFERENCES employers(employer_id),
                     vacancies_name varchar(255),
                     payment INTEGER,
-                    requirement TEXT,
                     vacancies_url TEXT,
-                    employer_id INTEGER REFERENCES employers(employer_id)
+                    requirement TEXT
                     )""")
     conn.commit()
     conn.close()
 
 
-def add_to_table(employers_list):
+def add_to_table(employers_list: list, db_name: str, params: dict) -> None:
     """Заполнение базы данных компании и вакансии"""
 
-    with psycopg2.connect(host="localhost", database="course_work_5",
-                          user="postgres", password="12345") as conn:
-        with conn.cursor() as cur:
-            cur.execute('TRUNCATE TABLE employers, vacancies RESTART IDENTITY;')
+    conn = psycopg2.connect(database=db_name, **params)
+    with conn.cursor() as cur:
+        cur.execute('TRUNCATE TABLE employers, vacancies RESTART IDENTITY;')
 
-            for employer in employers_list:
-                employer_list = get_employer(employer)
-                cur.execute('INSERT INTO employers (employer_id, company_name, open_vacancies) '
-                            'VALUES (%s, %s, %s) RETURNING employer_id',
-                            (employer_list['employer_id'], employer_list['company_name'],
-                             employer_list['open_vacancies']))
+        for employer in employers_list:
+            employer_info = get_employer(employer)
+            cur.execute('INSERT INTO employers (employer_id, company_name, open_vacancies) '
+                        'VALUES (%s, %s, %s)',
+                        (employer_info['employer_id'], employer_info['company_name'],
+                         employer_info['open_vacancies']))
 
-            for employer in employers_list:
-                vacancy_list = get_vacancies(employer)
-                for v in vacancy_list:
-                    cur.execute('INSERT INTO vacancies (vacancy_id, vacancies_name, '
-                                'payment, requirement, vacancies_url, employer_id) '
-                                'VALUES (%s, %s, %s, %s, %s, %s)',
-                                (v['vacancy_id'], v['vacancies_name'], v['payment'],
-                                 v['requirement'], v['vacancies_url'], v['employer_id']))
+            vacancy_list = get_vacancies(employer)
+            print(f"Добавляем в БД вакансии работодателя {employer_info['company_name']}")
+            for v in vacancy_list:
+                cur.execute('INSERT INTO vacancies (vacancy_id, employer_id, vacancies_name, '
+                            'payment, vacancies_url, requirement) '
+                            'VALUES (%s, %s, %s, %s, %s, %s)',
+                            (v['vacancy_id'], v['employer_id'], v['vacancies_name'], v['payment'],
+                             v['vacancies_url'], v['requirement']))
 
-        conn.commit()
+    conn.commit()
+    conn.close()
